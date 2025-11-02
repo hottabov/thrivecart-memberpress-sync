@@ -1491,11 +1491,53 @@ class AE_ThriveCart_MemberPress_Sync {
     }
 
     public function register_settings() {
-        register_setting('ae_tc_mp_sync_options', 'ae_tc_mp_sync_secret');
-        register_setting('ae_tc_mp_sync_options', 'ae_tc_mp_sync_api_key');
-        register_setting('ae_tc_mp_sync_options', 'ae_tc_mp_sync_admin_email');
-        register_setting('ae_tc_mp_sync_options', 'ae_tc_mp_sync_log_days', array('default' => 30));
-        register_setting('ae_tc_mp_sync_options', 'ae_tc_mp_sync_mappings', array('default' => array()));
+        register_setting('ae_tc_mp_sync_options', 'ae_tc_mp_sync_secret', array(
+            'type' => 'string',
+            'sanitize_callback' => 'sanitize_text_field',
+            'default' => ''
+        ));
+        
+        register_setting('ae_tc_mp_sync_options', 'ae_tc_mp_sync_api_key', array(
+            'type' => 'string',
+            'sanitize_callback' => 'sanitize_text_field',
+            'default' => ''
+        ));
+        
+        register_setting('ae_tc_mp_sync_options', 'ae_tc_mp_sync_admin_email', array(
+            'type' => 'string',
+            'sanitize_callback' => 'sanitize_email',
+            'default' => ''
+        ));
+        
+        register_setting('ae_tc_mp_sync_options', 'ae_tc_mp_sync_log_days', array(
+            'type' => 'integer',
+            'sanitize_callback' => 'absint',
+            'default' => 30
+        ));
+        
+        register_setting('ae_tc_mp_sync_options', 'ae_tc_mp_sync_mappings', array(
+            'type' => 'array',
+            'sanitize_callback' => array($this, 'sanitize_mappings'),
+            'default' => array()
+        ));
+    }
+    
+    public function sanitize_mappings($mappings) {
+        if (!is_array($mappings)) {
+            return array();
+        }
+        
+        $sanitized = array();
+        foreach ($mappings as $mapping) {
+            if (is_array($mapping)) {
+                $sanitized[] = array(
+                    'membership_id' => isset($mapping['membership_id']) ? absint($mapping['membership_id']) : 0,
+                    'tc_product_id' => isset($mapping['tc_product_id']) ? sanitize_text_field($mapping['tc_product_id']) : ''
+                );
+            }
+        }
+        
+        return $sanitized;
     }
 
     public function admin_notices() {
