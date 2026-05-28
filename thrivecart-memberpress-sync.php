@@ -3,7 +3,7 @@
  * Plugin Name: ThriveCart MemberPress Sync
  * Plugin URI: https://wordpress.org/plugins/thrivecart-memberpress-sync/
  * Description: Automatically sync ThriveCart subscription cancellations and refunds with MemberPress for accurate access control and statistics.
- * Version: 2.2.2
+ * Version: 3.0.0
  * Author: LeonovDesign
  * Author URI: https://leonovdesign.com
  * Requires at least: 6.0
@@ -17,7 +17,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('AE_TC_MP_SYNC_VERSION', '2.2.2');
+define('AE_TC_MP_SYNC_VERSION', '3.0.0');
 define('AE_TC_MP_SYNC_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('AE_TC_MP_SYNC_PLUGIN_URL', plugin_dir_url(__FILE__));
 // Store logs outside public directory for security
@@ -25,31 +25,25 @@ define('AE_TC_MP_SYNC_LOG_FILE', WP_CONTENT_DIR . '/ae-tc-mp-sync-logs/thrivecar
 
 /**
  * Changelog:
- * 
+ *
+ * v3.0.0 (2026-05-28) - Full Subscription Lifecycle Management
+ * - Fixed: CRITICAL — recurring subscriptions now get time-limited access (not lifetime)
+ * - Fixed: CRITICAL — $post undefined variable bug in cancellation handler
+ * - Added: Handlers for order.success and order.subscription_payment (set/extend expiry)
+ * - Added: Handlers for order.subscription_payment_failed and order.subscription_overdue (log only)
+ * - Added: Idempotency layer via WP transients (7-day deduplication)
+ * - Added: Twice-daily WP Cron safety net to expire overdue subscriptions
+ * - Added: Payment retry via WP Cron (handles TC→MP race condition)
+ * - Fixed: Webhook body parsing now supports JSON and form-encoded
+ * - Fixed: Secret never logged on authentication failure
+ * - Fixed: Raw POST data no longer logged (privacy/security)
+ * - Fixed: sanitize_mappings() now preserves tc_product_ids, active, payment_type, label
+ * - Fixed: Mapping save handler now merges instead of destroying existing fields
+ * - Fixed: current_time('timestamp') replaced with time() for UTC correctness
+ *
  * v2.2.2 (2025-11-02) - Critical Expiration Fix
  * - Fixed: Lifetime access bug for cancelled subscriptions
  * - Added: Automatic expiration setting on cancellation
- * - Added: Uses ThriveCart billing_period_end when available
- * - Added: Fallback calculation for expiration dates
- * - Updated: Manual gateway transactions now properly expire
- * 
- * v2.2.1 (2025-10-30) - Manual Gateway & UI Improvements
- * - Fixed: Manual gateway cancellation logging
- * - Updated: Simplified plugin name and description
- * - Added: Emoji icons on admin tabs
- * - Improved: Admin interface polish
- * 
- * v2.2.0 (2025-10-28) - Full MemberPress API Integration
- * - Added: Cancellations via MemberPress native API
- * - Added: Complete statistics tracking
- * - Added: User email notifications for cancellations
- * - Refactored: Pure integration layer architecture
- * 
- * v2.1.5 (2025-10-22) - Refund Support
- * - Added: Full refund processing via MemberPress API
- * - Added: Partial refund support
- * - Added: Immediate access termination on refund
- * - Added: User email notifications for refunds
  */
 
 class AE_ThriveCart_MemberPress_Sync {
@@ -78,6 +72,15 @@ class AE_ThriveCart_MemberPress_Sync {
         if (!wp_next_scheduled('ae_tc_mp_sync_cleanup_logs')) {
             wp_schedule_event(time(), 'daily', 'ae_tc_mp_sync_cleanup_logs');
         }
+
+        // Twice-daily safety net: cancel subscriptions whose transaction expiry has passed
+        add_action('ae_tc_mp_sync_expire_check', array($this, 'cron_expire_overdue_subscriptions'));
+        if (!wp_next_scheduled('ae_tc_mp_sync_expire_check')) {
+            wp_schedule_event(time(), 'twicedaily', 'ae_tc_mp_sync_expire_check');
+        }
+
+        // Retry handler for delayed payment processing (TC→MP race condition)
+        add_action('ae_tc_mp_sync_retry_payment', array($this, 'retry_payment_expiry'));
     }
 
     public function register_rest_routes() {
@@ -108,7 +111,7 @@ class AE_ThriveCart_MemberPress_Sync {
         if ($method === 'GET') {
             $response = array(
                 'ok' => true,
-                'message' => 'AE ThriveCart → MemberPress Sync webhook ready (v2.1 with Refund Support)',
+                'message' => 'AE ThriveCart → MemberPress Sync webhook ready (v3.0 — full subscription lifecycle)',
                 'version' => AE_TC_MP_SYNC_VERSION,
                 'features' => array(
                     'multiple_products_per_membership' => true,
@@ -123,19 +126,20 @@ class AE_ThriveCart_MemberPress_Sync {
 
         // Handle POST request (actual webhook)
         if ($method === 'POST') {
-            // Get form-encoded POST data (ThriveCart sends x-www-form-urlencoded)
-            $post_data = $_POST;
+            // Parse body: supports JSON and form-encoded (ThriveCart default)
+            $post_data = $this->parse_webhook_body($request);
 
             $this->log('Webhook POST received', array(
-                'event' => $post_data['event'] ?? 'unknown',
-                'raw_post' => $post_data
+                'event'    => $post_data['event'] ?? 'unknown',
+                'email'    => $this->extract_email($post_data),
+                'order_id' => $post_data['order_id'] ?? $post_data['id'] ?? 'unknown', // @TC_PAYLOAD_VERIFY
             ));
 
             // Authenticate using thrivecart_secret
             if (!$this->authenticate_thrivecart_request($post_data)) {
                 $this->log('Authentication failed', array(
                     'ip' => $_SERVER['REMOTE_ADDR'] ?? 'unknown',
-                    'secret_received' => $post_data['thrivecart_secret'] ?? 'none'
+                    // Never log the received secret — security risk
                 ));
                 return new WP_REST_Response(null, 200); // Return 200 to avoid ThriveCart retry
             }
@@ -177,72 +181,42 @@ class AE_ThriveCart_MemberPress_Sync {
     private function process_thrivecart_event($post_data) {
         $event = $post_data['event'] ?? '';
 
-        // Determine event type
-        $is_refund = ($event === 'order.refund' || $event === 'order.refunded');
+        // Classify event into one of four buckets
+        $is_payment      = ($event === 'order.success' || $event === 'order.subscription_payment');
+        $is_failed       = ($event === 'order.subscription_payment_failed' || $event === 'order.subscription_overdue');
         $is_cancellation = ($event === 'order.subscription_cancelled' || $event === 'order.rebill_cancelled');
+        $is_refund       = ($event === 'order.refund' || $event === 'order.refunded');
 
-        // Check if this is a supported event
-        if (!$is_refund && !$is_cancellation) {
-            $this->log('Event ignored (not a refund or cancellation)', array('event' => $event));
+        if (!$is_payment && !$is_failed && !$is_cancellation && !$is_refund) {
+            $this->log('Event ignored (unrecognised type)', array('event' => $event));
             return array('ok' => true, 'message' => 'Event type ignored');
         }
 
-        // Extract customer email
-        $email = '';
-        if (isset($post_data['customer']['email'])) {
-            $email = $post_data['customer']['email'];
-        } elseif (isset($post_data['customer_email'])) {
-            $email = $post_data['customer_email'];
+        // Idempotency check — prevents duplicate processing from TC retries
+        $idempotency_key = $this->build_idempotency_key($post_data);
+        if ($this->is_duplicate_event($idempotency_key)) {
+            $this->log('Duplicate event — skipped', array('event' => $event, 'key' => $idempotency_key));
+            return array('ok' => true, 'message' => 'Duplicate event ignored');
         }
 
+        // Extract customer email
+        $email = $this->extract_email($post_data);
         if (empty($email)) {
-            $this->log('Missing customer email', array('post_data' => $post_data));
+            $this->log('Missing customer email', array('event' => $event));
             return array('ok' => false, 'error' => 'Missing email');
         }
 
-        // Extract product ID based on event type
-        $tc_product_id = '';
-        
-        if ($is_refund) {
-            // For refund events, check refund object first
-            if (isset($post_data['refund']['product_id'])) {
-                $tc_product_id = $post_data['refund']['product_id'];
-            } elseif (isset($post_data['refund']['id'])) {
-                $tc_product_id = $post_data['refund']['id'];
-            } elseif (isset($post_data['refund']['bump_id'])) {
-                $tc_product_id = $post_data['refund']['bump_id'];
-            } elseif (isset($post_data['refund']['upsell_id'])) {
-                $tc_product_id = $post_data['refund']['upsell_id'];
-            } elseif (isset($post_data['base_product'])) {
-                $tc_product_id = $post_data['base_product'];
-            }
-        } else {
-            // For cancellation events, use subscription data
-            if (isset($post_data['subscription']['id'])) {
-                $tc_product_id = $post_data['subscription']['id'];
-            } elseif (isset($post_data['subscription_id'])) {
-                $tc_product_id = $post_data['subscription_id'];
-            } elseif (isset($post_data['base_product'])) {
-                $tc_product_id = $post_data['base_product'];
-            }
-        }
-
+        // Extract product ID
+        $tc_product_id = $this->extract_product_id($post_data, $is_refund, $is_cancellation);
         if (empty($tc_product_id) || $tc_product_id === 'null') {
             $this->log('Missing product ID', array(
-                'post_data' => $post_data,
-                'is_refund' => $is_refund,
-                'checked_paths' => $is_refund ? 
-                    'refund.product_id, refund.id, refund.bump_id, refund.upsell_id, base_product' : 
-                    'subscription.id, subscription_id, base_product'
+                'event'         => $event,
+                'checked_paths' => $is_refund
+                    ? 'refund.product_id, refund.id, refund.bump_id, refund.upsell_id, base_product'
+                    : 'subscription.id, subscription_id, base_product, product_id',
             ));
             return array('ok' => false, 'error' => 'Missing product ID');
         }
-
-        $this->log($is_refund ? 'Processing REFUND' : 'Processing CANCELLATION', array(
-            'email' => $email,
-            'tc_product_id' => $tc_product_id,
-            'event' => $event
-        ));
 
         // Find WordPress user
         $user = get_user_by('email', $email);
@@ -251,151 +225,86 @@ class AE_ThriveCart_MemberPress_Sync {
             return array('ok' => false, 'error' => 'User not found');
         }
 
-        // Get mapping - ENHANCED to support multiple products per membership
-        $mappings = get_option('ae_tc_mp_sync_mappings', array());
-        $membership_id = null;
-        $matched_mapping = null;
-
-        foreach ($mappings as $mapping) {
-            // Check if mapping is active
-            $is_active = !isset($mapping['active']) || $mapping['active'] === '1' || $mapping['active'] === true;
-            if (!$is_active) {
-                continue;
-            }
-
-            // Support multiple formats for product IDs
-            $product_ids = array();
-            
-            if (isset($mapping['tc_product_ids']) && is_array($mapping['tc_product_ids'])) {
-                // New format: array of product IDs
-                $product_ids = $mapping['tc_product_ids'];
-            } elseif (isset($mapping['tc_product_id'])) {
-                // Old format or comma-separated string
-                $raw_ids = $mapping['tc_product_id'];
-                
-                if (is_string($raw_ids) && strpos($raw_ids, ',') !== false) {
-                    // Comma-separated: "31, 32" or "5, 11, 13, 25"
-                    $product_ids = array_map('trim', explode(',', $raw_ids));
-                } else {
-                    // Single product ID
-                    $product_ids = array(trim($raw_ids));
-                }
-            }
-            
-            // Remove empty values
-            $product_ids = array_filter($product_ids);
-            
-            // Check if incoming product ID matches any in this mapping
-            if (in_array($tc_product_id, $product_ids)) {
-                $membership_id = $mapping['membership_id'];
-                $matched_mapping = $mapping;
-                break;
-            }
-        }
-
-        if (!$membership_id) {
-            $this->log('No mapping found', array(
-                'tc_product_id' => $tc_product_id, 
-                'available_mappings' => $mappings
-            ));
+        // Find mapping entry
+        $matched_mapping = $this->find_mapping($tc_product_id);
+        if (!$matched_mapping) {
+            $this->log('No mapping found', array('tc_product_id' => $tc_product_id));
             return array('ok' => false, 'error' => 'No mapping found for product');
         }
 
-        // Log which mapping was used
+        $membership_id = (int) $matched_mapping['membership_id'];
+
         $this->log('Mapping found', array(
             'tc_product_id' => $tc_product_id,
             'membership_id' => $membership_id,
-            'payment_type' => $matched_mapping['payment_type'] ?? 'not_set',
-            'label' => $matched_mapping['label'] ?? 'unlabeled'
+            'payment_type'  => $matched_mapping['payment_type'] ?? 'not_set',
+            'label'         => $matched_mapping['label'] ?? 'unlabeled',
         ));
 
-        // Process based on event type
-        if ($is_refund) {
-            // REFUND: Determine if subscription or one-time purchase
-            $subscription_id = $post_data['subscription_id'] ?? null;
-            $is_subscription = ($subscription_id && $subscription_id !== 'null');
-            
-            $refund_type = $post_data['refund']['type'] ?? 'full';
-            $refund_amount = $post_data['refund']['amount'] ?? '0.00';
-            
-            $this->log('Processing REFUND', array(
-                'email' => $email,
-                'tc_product_id' => $tc_product_id,
-                'refund_type' => $refund_type,
-                'refund_amount' => $refund_amount,
-                'is_subscription' => $is_subscription,
-                'subscription_id' => $subscription_id,
-                'event' => $event
-            ));
+        // Route to handler
+        if ($is_payment) {
+            $results     = $this->handle_successful_payment($user->ID, $membership_id, $post_data);
+            $action_type = 'payment';
+            $log_message = 'Successful payment — expiry set/extended';
 
-            // Get refund amount from webhook
+        } elseif ($is_failed) {
+            $results     = $this->handle_failed_payment($user->ID, $membership_id, $post_data);
+            $action_type = 'payment_failed';
+            $log_message = 'Failed payment logged — no access change (cron handles expiry)';
+
+        } elseif ($is_refund) {
+            // @TC_PAYLOAD_VERIFY: refund.amount — verify if TC sends cents or dollars
             $refund_amount_cents = $post_data['refund']['amount'] ?? null;
             $refund_amount = null;
-            
             if ($refund_amount_cents !== null) {
-                // Convert from cents to dollars (ThriveCart sends in cents)
+                // Treating as cents (existing behaviour) — verify against live webhooks
                 $refund_amount = number_format($refund_amount_cents / 100, 2, '.', '');
             }
-            
-            $refund_type = $post_data['refund']['type'] ?? 'full';
-            
-            $this->log('Using MemberPress native refund API', array(
-                'email' => $email,
-                'refund_amount' => $refund_amount ?? 'full',
-                'refund_type' => $refund_type
-            ));
 
-            // Use MemberPress native refund API
-            // This handles everything automatically:
-            // - Transaction status → "refunded"
-            // - Subscription cancellation
-            // - Access revocation
-            // - Statistics updates
-            // - User email notification
-            $results = $this->process_memberpress_refund(
-                $user->ID, 
-                $membership_id,
-                $refund_amount
-            );
-            
-            $action_type = 'refund';
-            $log_message = 'Refund processed via MemberPress API - transaction refunded, subscription cancelled, access revoked';
-            
-        } else {
-            // CANCELLATION: Use MemberPress native cancellation API
-            $this->log('Processing CANCELLATION via MemberPress API', array(
-                'email' => $email,
+            $this->log('Processing REFUND', array(
+                'email'        => $email,
                 'tc_product_id' => $tc_product_id,
-                'event' => $event
+                'refund_amount' => $refund_amount ?? 'full',
+                'refund_type'  => $post_data['refund']['type'] ?? 'full',
             ));
 
-            // Use MemberPress native cancellation API
-            // This handles everything automatically:
-            // - Subscription status → "cancelled"
-            // - Access until end of period
-            // - Statistics updates
-            // - User email notification (optional)
-            $results = $this->process_memberpress_cancellation($user->ID, $membership_id, $post);
+            $results     = $this->process_memberpress_refund($user->ID, $membership_id, $refund_amount);
+            $action_type = 'refund';
+            $log_message = 'Refund processed — transaction refunded, access revoked';
+
+        } else {
+            // Cancellation
+            $this->log('Processing CANCELLATION', array(
+                'email'         => $email,
+                'tc_product_id' => $tc_product_id,
+                'event'         => $event,
+            ));
+
+            // Pass $post_data (not the WordPress global $post)
+            $results     = $this->process_memberpress_cancellation($user->ID, $membership_id, $post_data);
             $action_type = 'cancellation';
-            $log_message = 'Cancellation processed via MemberPress API - subscription cancelled, access until end of period';
+            $log_message = 'Cancellation processed — access until end of period';
         }
 
-        // Send notification
+        // Mark event processed only after successful handling
+        $this->mark_event_processed($idempotency_key);
+
+        // Admin notification
         $this->send_notification($user, $membership_id, $results, $tc_product_id, $matched_mapping, $action_type);
 
         $this->log($log_message, array(
-            'user_id' => $user->ID,
+            'user_id'       => $user->ID,
             'membership_id' => $membership_id,
-            'action_type' => $action_type,
-            'results' => $results
+            'action_type'   => $action_type,
+            'results'       => $results,
         ));
 
         return array(
-            'ok' => true,
-            'user_id' => $user->ID,
+            'ok'            => true,
+            'user_id'       => $user->ID,
             'membership_id' => $membership_id,
-            'action_type' => $action_type,
-            'results' => $results,
+            'action_type'   => $action_type,
+            'results'       => $results,
         );
     }
 
@@ -568,8 +477,8 @@ class AE_ThriveCart_MemberPress_Sync {
         $code = wp_remote_retrieve_response_code($update_response);
         
         if ($code === 200) {
-            // Also expire membership immediately
-            $current_time = current_time('timestamp');
+            // Also expire membership immediately — use time() for UTC consistency
+            $current_time = time();
             update_user_meta($user_id, '_mepr-expire-' . $membership_id, $current_time);
             
             $this->log('Fallback refund successful', array(
@@ -779,9 +688,10 @@ class AE_ThriveCart_MemberPress_Sync {
                     global $wpdb;
                     
                     // MemberPress stores membership expiration in user meta
-                    $meta_key = '_mepr-expire-' . $membership_id;
-                    $current_time = current_time('timestamp');
-                    
+                    // Use time() (UTC) not current_time('timestamp') (local time)
+                    $meta_key     = '_mepr-expire-' . $membership_id;
+                    $current_time = time();
+
                     update_user_meta($user_id, $meta_key, $current_time);
                     
                     $results[] = array(
@@ -873,8 +783,9 @@ class AE_ThriveCart_MemberPress_Sync {
         }
         
         // Step 2: Set membership expiration to NOW (immediate access termination)
-        $current_time = current_time('timestamp');
-        $meta_key = '_mepr-expire-' . $membership_id;
+        // Use time() (UTC) not current_time('timestamp') (local time)
+        $current_time = time();
+        $meta_key     = '_mepr-expire-' . $membership_id;
         
         update_user_meta($user_id, $meta_key, $current_time);
         
@@ -1287,13 +1198,20 @@ class AE_ThriveCart_MemberPress_Sync {
         }
 
         $membership = json_decode(wp_remote_retrieve_body($membership_response), true);
-        $period_type = $membership['period'] ?? 'month';
-        $period_value = $membership['period_count'] ?? 1;
-        
+
+        // MemberPress API: 'period' = integer count, 'period_type' = unit string ("months", "years", etc.)
+        $period_value = (int) ($membership['period']      ?? 1);
+        $period_type  = $membership['period_type'] ?? 'months';
+
+        $allowed_units = array('days', 'weeks', 'months', 'years');
+        if (!in_array($period_type, $allowed_units, true)) {
+            $period_type = 'months';
+        }
+
         // Calculate expiration: created_at + period
         $created_timestamp = strtotime($created_at);
         $expires_timestamp = strtotime("+{$period_value} {$period_type}", $created_timestamp);
-        $expires_at = date('Y-m-d H:i:s', $expires_timestamp);
+        $expires_at = gmdate('Y-m-d H:i:s', $expires_timestamp);
         
         // Update transaction via API
         $updated = $this->update_transaction_expiration($trans_id, $expires_at);
@@ -1515,6 +1433,12 @@ class AE_ThriveCart_MemberPress_Sync {
             'default' => 30
         ));
         
+        register_setting('ae_tc_mp_sync_options', 'ae_tc_mp_sync_hub_url', array(
+            'type' => 'string',
+            'sanitize_callback' => 'esc_url_raw',
+            'default' => ''
+        ));
+
         register_setting('ae_tc_mp_sync_options', 'ae_tc_mp_sync_mappings', array(
             'type' => 'array',
             'sanitize_callback' => array($this, 'sanitize_mappings'),
@@ -1526,17 +1450,29 @@ class AE_ThriveCart_MemberPress_Sync {
         if (!is_array($mappings)) {
             return array();
         }
-        
+
         $sanitized = array();
         foreach ($mappings as $mapping) {
-            if (is_array($mapping)) {
-                $sanitized[] = array(
-                    'membership_id' => isset($mapping['membership_id']) ? absint($mapping['membership_id']) : 0,
-                    'tc_product_id' => isset($mapping['tc_product_id']) ? sanitize_text_field($mapping['tc_product_id']) : ''
-                );
+            if (!is_array($mapping)) continue;
+
+            $entry = array(
+                'membership_id' => isset($mapping['membership_id']) ? absint($mapping['membership_id']) : 0,
+                'tc_product_id' => isset($mapping['tc_product_id']) ? sanitize_text_field($mapping['tc_product_id']) : '',
+                'active'        => isset($mapping['active']) ? (string) $mapping['active'] : '1',
+                'payment_type'  => isset($mapping['payment_type']) ? sanitize_text_field($mapping['payment_type']) : 'any',
+                'label'         => isset($mapping['label']) ? sanitize_text_field($mapping['label']) : '',
+            );
+
+            // Preserve multi-product IDs array
+            if (isset($mapping['tc_product_ids']) && is_array($mapping['tc_product_ids'])) {
+                $entry['tc_product_ids'] = array_map('sanitize_text_field', $mapping['tc_product_ids']);
+            }
+
+            if ($entry['membership_id'] > 0) {
+                $sanitized[] = $entry;
             }
         }
-        
+
         return $sanitized;
     }
 
@@ -1605,18 +1541,42 @@ class AE_ThriveCart_MemberPress_Sync {
         }
 
         if (isset($_POST['ae_tc_mappings_submit']) && check_admin_referer('ae_tc_mappings_action', 'ae_tc_mappings_nonce')) {
-            $mappings = array();
+            // Load existing mappings and index by membership_id so we can preserve all fields
+            $existing_mappings = get_option('ae_tc_mp_sync_mappings', array());
+            $existing_by_id    = array();
+            foreach ($existing_mappings as $m) {
+                if (!empty($m['membership_id'])) {
+                    $existing_by_id[(int) $m['membership_id']] = $m;
+                }
+            }
+
             $memberships = get_posts(array('post_type' => 'memberpressproduct', 'posts_per_page' => -1));
+            $mappings    = array();
 
             foreach ($memberships as $membership) {
-                $tc_id = sanitize_text_field($_POST['tc_product_id_' . $membership->ID] ?? '');
-                $mappings[] = array('membership_id' => $membership->ID, 'tc_product_id' => $tc_id);
+                $mid   = $membership->ID;
+                $tc_id = sanitize_text_field($_POST['tc_product_id_' . $mid] ?? '');
+
+                // Merge: start from existing entry to preserve payment_type, label, active, tc_product_ids
+                $entry = $existing_by_id[$mid] ?? array(
+                    'membership_id' => $mid,
+                    'payment_type'  => 'any',
+                    'label'         => '',
+                    'active'        => '1',
+                );
+
+                $entry['membership_id'] = $mid;
+                $entry['tc_product_id'] = $tc_id;
+
+                $mappings[] = $entry;
             }
 
             update_option('ae_tc_mp_sync_mappings', $mappings);
             echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__('✅ Mappings saved!', 'ae-tc-mp-sync') . '</p></div>';
         }
 
+        // Read current page slug so tab links work whether accessed via Settings or MemberPress menu
+        $page_slug = sanitize_key($_GET['page'] ?? 'ae-tc-mp-sync');
         $active_tab = $_GET['tab'] ?? 'settings';
         ?>
         <div class="wrap ae-tc-mp-sync-wrap">
@@ -1624,12 +1584,12 @@ class AE_ThriveCart_MemberPress_Sync {
             <p class="description"><?php echo esc_html__('by', 'ae-tc-mp-sync'); ?> <a href="https://leonovdesign.com" target="_blank">LeonovDesign</a> | Sync cancellations and refunds automatically</p>
 
             <nav class="nav-tab-wrapper">
-                <a href="?page=ae-tc-mp-sync-mp&tab=settings" class="nav-tab <?php echo $active_tab === 'settings' ? 'nav-tab-active' : ''; ?>">⚙️ <?php esc_html_e('General Settings', 'ae-tc-mp-sync'); ?></a>
-                <a href="?page=ae-tc-mp-sync-mp&tab=mappings" class="nav-tab <?php echo $active_tab === 'mappings' ? 'nav-tab-active' : ''; ?>">🔗 <?php esc_html_e('Product Mappings', 'ae-tc-mp-sync'); ?></a>
-                <a href="?page=ae-tc-mp-sync-mp&tab=tools" class="nav-tab <?php echo $active_tab === 'tools' ? 'nav-tab-active' : ''; ?>">🛠️ <?php esc_html_e('Tools', 'ae-tc-mp-sync'); ?></a>
-                <a href="?page=ae-tc-mp-sync-mp&tab=status" class="nav-tab <?php echo $active_tab === 'status' ? 'nav-tab-active' : ''; ?>">📡 <?php esc_html_e('Webhook Status', 'ae-tc-mp-sync'); ?></a>
-                <a href="?page=ae-tc-mp-sync-mp&tab=logs" class="nav-tab <?php echo $active_tab === 'logs' ? 'nav-tab-active' : ''; ?>">📋 <?php esc_html_e('Recent Logs', 'ae-tc-mp-sync'); ?></a>
-                <a href="?page=ae-tc-mp-sync-mp&tab=manual" class="nav-tab <?php echo $active_tab === 'manual' ? 'nav-tab-active' : ''; ?>">📖 <?php esc_html_e('Setup Manual', 'ae-tc-mp-sync'); ?></a>
+                <a href="?page=<?php echo esc_attr($page_slug); ?>&tab=settings" class="nav-tab <?php echo $active_tab === 'settings' ? 'nav-tab-active' : ''; ?>">⚙️ <?php esc_html_e('General Settings', 'ae-tc-mp-sync'); ?></a>
+                <a href="?page=<?php echo esc_attr($page_slug); ?>&tab=mappings" class="nav-tab <?php echo $active_tab === 'mappings' ? 'nav-tab-active' : ''; ?>">🔗 <?php esc_html_e('Product Mappings', 'ae-tc-mp-sync'); ?></a>
+                <a href="?page=<?php echo esc_attr($page_slug); ?>&tab=tools" class="nav-tab <?php echo $active_tab === 'tools' ? 'nav-tab-active' : ''; ?>">🛠️ <?php esc_html_e('Tools', 'ae-tc-mp-sync'); ?></a>
+                <a href="?page=<?php echo esc_attr($page_slug); ?>&tab=status" class="nav-tab <?php echo $active_tab === 'status' ? 'nav-tab-active' : ''; ?>">📡 <?php esc_html_e('Webhook Status', 'ae-tc-mp-sync'); ?></a>
+                <a href="?page=<?php echo esc_attr($page_slug); ?>&tab=logs" class="nav-tab <?php echo $active_tab === 'logs' ? 'nav-tab-active' : ''; ?>">📋 <?php esc_html_e('Recent Logs', 'ae-tc-mp-sync'); ?></a>
+                <a href="?page=<?php echo esc_attr($page_slug); ?>&tab=manual" class="nav-tab <?php echo $active_tab === 'manual' ? 'nav-tab-active' : ''; ?>">📖 <?php esc_html_e('Setup Manual', 'ae-tc-mp-sync'); ?></a>
             </nav>
 
             <div class="tab-content">
@@ -1653,6 +1613,7 @@ class AE_ThriveCart_MemberPress_Sync {
         $api_key = get_option('ae_tc_mp_sync_api_key', '');
         $admin_email = get_option('ae_tc_mp_sync_admin_email', '');
         $log_days = get_option('ae_tc_mp_sync_log_days', 30);
+        $hub_url = get_option('ae_tc_mp_sync_hub_url', '');
         ?>
         <form method="post" action="options.php">
             <?php settings_fields('ae_tc_mp_sync_options'); ?>
@@ -1694,6 +1655,13 @@ class AE_ThriveCart_MemberPress_Sync {
                     <td>
                         <input type="number" id="ae_tc_mp_sync_log_days" name="ae_tc_mp_sync_log_days" value="<?php echo esc_attr($log_days); ?>" min="1" max="365" />
                         <p class="description"><?php esc_html_e('How many days to keep log entries.', 'ae-tc-mp-sync'); ?></p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="ae_tc_mp_sync_hub_url"><?php esc_html_e('ThriveCart Customer Hub URL', 'ae-tc-mp-sync'); ?></label></th>
+                    <td>
+                        <input type="url" id="ae_tc_mp_sync_hub_url" name="ae_tc_mp_sync_hub_url" value="<?php echo esc_attr($hub_url); ?>" class="large-text" placeholder="https://your-site.thrivecart.com/updateinfo/" />
+                        <p class="description"><?php esc_html_e('Optional. Your ThriveCart Customer Hub URL. If provided, a "Manage my subscriptions" button will appear on the MemberPress account page.', 'ae-tc-mp-sync'); ?></p>
                     </td>
                 </tr>
             </table>
@@ -2126,6 +2094,516 @@ class AE_ThriveCart_MemberPress_Sync {
         <?php
     }
 
+    // ============================================================================
+    // NEW v3.0.0: Webhook body parsing, idempotency, extraction helpers
+    // ============================================================================
+
+    /**
+     * Parse webhook body from WP_REST_Request.
+     * Supports JSON (Content-Type: application/json) and form-encoded (TC default).
+     */
+    private function parse_webhook_body(WP_REST_Request $request): array {
+        $content_type = $request->get_header('content-type') ?? '';
+
+        if (strpos($content_type, 'application/json') !== false) {
+            $params = $request->get_json_params();
+            if (is_array($params) && !empty($params)) {
+                return $params;
+            }
+        }
+
+        $params = $request->get_body_params();
+        if (is_array($params) && !empty($params)) {
+            return $params;
+        }
+
+        // Last-resort fallback for edge cases
+        return is_array($_POST) ? $_POST : array();
+    }
+
+    /**
+     * Build a stable idempotency key for deduplication.
+     * Key: event | order_id | subscription_id | payment_id
+     *
+     * @TC_PAYLOAD_VERIFY: all field names — verify against live TC webhook logs.
+     */
+    private function build_idempotency_key(array $post_data): string {
+        $event      = $post_data['event'] ?? '';
+        $order_id   = $post_data['order_id'] ?? $post_data['id'] ?? '';                              // @TC_PAYLOAD_VERIFY
+        $sub_id     = $post_data['subscription']['id'] ?? $post_data['subscription_id'] ?? '';       // @TC_PAYLOAD_VERIFY
+        $payment_id = $post_data['rebill']['payment_id'] ?? $post_data['rebill']['id'] ?? $post_data['payment_id'] ?? ''; // @TC_PAYLOAD_VERIFY
+
+        return 'ae_tc_mp_idem_' . md5($event . '|' . $order_id . '|' . $sub_id . '|' . $payment_id);
+    }
+
+    private function is_duplicate_event(string $key): bool {
+        return get_transient($key) !== false;
+    }
+
+    private function mark_event_processed(string $key): void {
+        set_transient($key, 1, 604800); // 7 days
+    }
+
+    /**
+     * Extract customer email from ThriveCart webhook payload.
+     */
+    private function extract_email(array $post_data): string {
+        if (!empty($post_data['customer']['email'])) {
+            return sanitize_email($post_data['customer']['email']);
+        }
+        if (!empty($post_data['customer_email'])) {
+            return sanitize_email($post_data['customer_email']);
+        }
+        return '';
+    }
+
+    /**
+     * Extract ThriveCart product ID for event routing.
+     *
+     * @TC_PAYLOAD_VERIFY: refund.* field names — verify against live refund webhooks.
+     * @TC_PAYLOAD_VERIFY: product_id field for payment events.
+     */
+    private function extract_product_id(array $post_data, bool $is_refund, bool $is_cancellation): string {
+        if ($is_refund) {
+            if (!empty($post_data['refund']['product_id'])) return (string) $post_data['refund']['product_id']; // @TC_PAYLOAD_VERIFY
+            if (!empty($post_data['refund']['id']))         return (string) $post_data['refund']['id'];         // @TC_PAYLOAD_VERIFY
+            if (!empty($post_data['refund']['bump_id']))    return (string) $post_data['refund']['bump_id'];    // @TC_PAYLOAD_VERIFY
+            if (!empty($post_data['refund']['upsell_id'])) return (string) $post_data['refund']['upsell_id'];  // @TC_PAYLOAD_VERIFY
+            if (!empty($post_data['base_product']))         return (string) $post_data['base_product'];
+        } elseif ($is_cancellation) {
+            if (!empty($post_data['subscription']['id'])) return (string) $post_data['subscription']['id'];
+            if (!empty($post_data['subscription_id']))    return (string) $post_data['subscription_id'];
+            if (!empty($post_data['base_product']))       return (string) $post_data['base_product'];
+        } else {
+            // Payment events: order.success, order.subscription_payment
+            if (!empty($post_data['subscription']['id'])) return (string) $post_data['subscription']['id']; // @TC_PAYLOAD_VERIFY
+            if (!empty($post_data['base_product']))       return (string) $post_data['base_product'];
+            if (!empty($post_data['product_id']))         return (string) $post_data['product_id'];          // @TC_PAYLOAD_VERIFY
+        }
+        return '';
+    }
+
+    /**
+     * Find the mapping entry matching a ThriveCart product ID.
+     * Returns matching mapping array or null.
+     */
+    private function find_mapping(string $tc_product_id): ?array {
+        $mappings = get_option('ae_tc_mp_sync_mappings', array());
+
+        foreach ($mappings as $mapping) {
+            $is_active = !isset($mapping['active']) || $mapping['active'] === '1' || $mapping['active'] === true;
+            if (!$is_active) continue;
+
+            $product_ids = array();
+            if (isset($mapping['tc_product_ids']) && is_array($mapping['tc_product_ids'])) {
+                $product_ids = $mapping['tc_product_ids'];
+            } elseif (isset($mapping['tc_product_id'])) {
+                $raw = $mapping['tc_product_id'];
+                $product_ids = (strpos($raw, ',') !== false)
+                    ? array_map('trim', explode(',', $raw))
+                    : array(trim($raw));
+            }
+
+            if (in_array($tc_product_id, array_filter($product_ids), true)) {
+                return $mapping;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract payment timestamp from webhook payload.
+     * Returns current UTC time as safe fallback.
+     *
+     * @TC_PAYLOAD_VERIFY: ALL field name candidates below — verify against live webhooks for
+     * both order.success and order.subscription_payment events.
+     */
+    private function extract_payment_date(array $post_data): int {
+        $candidates = array(
+            $post_data['rebill']['date']    ?? null, // @TC_PAYLOAD_VERIFY
+            $post_data['rebill']['created'] ?? null, // @TC_PAYLOAD_VERIFY
+            $post_data['payment_date']      ?? null, // @TC_PAYLOAD_VERIFY
+            $post_data['order_date']        ?? null, // @TC_PAYLOAD_VERIFY
+            $post_data['created']           ?? null, // @TC_PAYLOAD_VERIFY
+            $post_data['date']              ?? null, // @TC_PAYLOAD_VERIFY
+        );
+
+        foreach ($candidates as $candidate) {
+            if (empty($candidate)) continue;
+            $ts = is_numeric($candidate) ? (int) $candidate : strtotime($candidate);
+            if ($ts && $ts > 0) {
+                return $ts;
+            }
+        }
+
+        return time(); // UTC fallback
+    }
+
+    // ============================================================================
+    // NEW v3.0.0: Payment handlers
+    // ============================================================================
+
+    /**
+     * Handle a confirmed payment (order.success or order.subscription_payment).
+     *
+     * Strategy:
+     * 1. Fetch most recent COMPLETE transaction for this user + membership.
+     * 2. Calculate new expiry = payment_date + billing_period + 2h grace.
+     * 3. Update transaction's expires_at only if new expiry > current.
+     * 4. If no transaction exists yet, schedule retry (TC→MP race condition).
+     *
+     * This is the core fix for the lifetime-access bug: every confirmed payment
+     * stamps a time-limited expiry on the MemberPress transaction.
+     */
+    private function handle_successful_payment(int $user_id, int $membership_id, array $webhook_data): array {
+        $api_key = get_option('ae_tc_mp_sync_api_key', '');
+        if (empty($api_key)) {
+            return array(array('error' => 'API key not configured'));
+        }
+
+        $site_url = get_site_url();
+
+        $trans_response = wp_remote_get($site_url . '/wp-json/mp/v1/transactions', array(
+            'timeout' => 20,
+            'headers' => array('MEMBERPRESS-API-KEY' => $api_key),
+            'body'    => array(
+                'member'     => $user_id,
+                'membership' => $membership_id,
+                'status'     => 'complete',
+                'per_page'   => 100,
+            ),
+        ));
+
+        if (is_wp_error($trans_response)) {
+            $this->log('handle_successful_payment: failed to fetch transactions', array(
+                'error' => $trans_response->get_error_message(),
+            ));
+            return array(array('error' => 'Failed to fetch transactions: ' . $trans_response->get_error_message()));
+        }
+
+        $transactions = json_decode(wp_remote_retrieve_body($trans_response), true);
+
+        if (empty($transactions) || !is_array($transactions)) {
+            // TC→MP integration may not have created the transaction yet — retry in 120s
+            $this->log('handle_successful_payment: no transactions found — scheduling retry', array(
+                'user_id'       => $user_id,
+                'membership_id' => $membership_id,
+            ));
+            $this->schedule_payment_retry($user_id, $membership_id, $webhook_data);
+            return array(array('message' => 'No transactions found — retry scheduled in 120s'));
+        }
+
+        // Find most recent transaction (highest ID = most recently created)
+        $latest    = null;
+        $latest_id = 0;
+        foreach ($transactions as $t) {
+            $tid = (int) ($t['id'] ?? 0);
+            if ($tid > $latest_id) {
+                $latest_id = $tid;
+                $latest    = $t;
+            }
+        }
+
+        if (!$latest) {
+            return array(array('error' => 'No valid transaction found'));
+        }
+
+        $trans_id = $latest['id'];
+
+        // Calculate new expiry: payment_date + billing_period + 2h grace
+        $payment_ts   = $this->extract_payment_date($webhook_data);
+        $period_info  = $this->get_membership_period($membership_id);
+        $period_value = $period_info['period_count'] ?? 1;
+        $period_type  = $period_info['period']       ?? 'months';
+
+        $new_expiry_ts  = strtotime("+{$period_value} {$period_type}", $payment_ts) + (2 * HOUR_IN_SECONDS);
+        $new_expiry_str = gmdate('Y-m-d H:i:s', $new_expiry_ts);
+
+        // Check current expires_at — only update if new date is later
+        $current_expires = $latest['expires_at'] ?? null;
+        $current_ts      = 0;
+        if ($current_expires
+            && $current_expires !== '0000-00-00 00:00:00'
+            && strtolower($current_expires) !== 'never') {
+            $current_ts = (int) strtotime($current_expires);
+        }
+
+        if ($current_ts >= $new_expiry_ts) {
+            $this->log('handle_successful_payment: expiry already covers period — no change', array(
+                'trans_id'       => $trans_id,
+                'current_expiry' => $current_expires,
+                'new_expiry'     => $new_expiry_str,
+            ));
+            return array(array(
+                'success'  => true,
+                'trans_id' => $trans_id,
+                'message'  => 'Expiry already covers payment period — no change',
+            ));
+        }
+
+        $updated = $this->update_transaction_expiration($trans_id, $new_expiry_str);
+
+        if ($updated) {
+            $this->log('handle_successful_payment: expiry set', array(
+                'trans_id'     => $trans_id,
+                'payment_date' => gmdate('Y-m-d H:i:s', $payment_ts),
+                'period'       => "{$period_value} {$period_type}",
+                'expires_at'   => $new_expiry_str,
+            ));
+
+            return array(array(
+                'success'    => true,
+                'trans_id'   => $trans_id,
+                'expires_at' => $new_expiry_str,
+                'message'    => 'Expiry set: payment_date + ' . $period_value . ' ' . $period_type . ' + 2h grace',
+            ));
+        }
+
+        return array(array('error' => 'Failed to update transaction expiry', 'trans_id' => $trans_id));
+    }
+
+    /**
+     * Handle a failed payment (order.subscription_payment_failed, order.subscription_overdue).
+     *
+     * Policy: do NOT revoke access immediately.
+     * The existing expires_at on the transaction acts as the clock.
+     * The twice-daily cron will cancel the subscription once expiry passes.
+     * This prevents false-positive lockouts from transient payment failures.
+     */
+    private function handle_failed_payment(int $user_id, int $membership_id, array $webhook_data): array {
+        $event = $webhook_data['event'] ?? 'unknown';
+        $this->log('handle_failed_payment: logged, no access change', array(
+            'event'         => $event,
+            'user_id'       => $user_id,
+            'membership_id' => $membership_id,
+        ));
+        return array(array(
+            'message' => 'Failed payment logged — no immediate access change. Cron expires access when date passes.',
+            'event'   => $event,
+        ));
+    }
+
+    /**
+     * Fetch membership billing period from MemberPress API.
+     * Returns array: ['period' => string, 'period_count' => int].
+     * Cached 1 hour per membership.
+     */
+    private function get_membership_period(int $membership_id): array {
+        $cache_key = 'ae_tc_mp_period_' . $membership_id;
+        $cached    = get_transient($cache_key);
+        if ($cached !== false) {
+            return $cached;
+        }
+
+        $api_key  = get_option('ae_tc_mp_sync_api_key', '');
+        $site_url = get_site_url();
+
+        $response = wp_remote_get($site_url . '/wp-json/mp/v1/memberships/' . $membership_id, array(
+            'timeout' => 10,
+            'headers' => array('MEMBERPRESS-API-KEY' => $api_key),
+        ));
+
+        if (is_wp_error($response)) {
+            return array('period' => 'months', 'period_count' => 1); // safe fallback
+        }
+
+        $data = json_decode(wp_remote_retrieve_body($response), true);
+
+        // MemberPress API: 'period' = integer count (e.g. 1), 'period_type' = unit string (e.g. "months").
+        // 'period_count' does NOT exist in the MP REST API — that was a wrong assumption.
+        $period_count = (int) ($data['period'] ?? 1);
+        $period_type  = $data['period_type'] ?? 'months';
+
+        // Normalize to strtotime-compatible unit (MP returns "months", "years", "weeks", "days").
+        // If an unexpected value arrives, fall back to "months".
+        $allowed_units = array('days', 'weeks', 'months', 'years');
+        if (!in_array($period_type, $allowed_units, true)) {
+            $period_type = 'months';
+        }
+
+        $result = array(
+            'period'       => $period_type,  // strtotime unit: "months", "years", "weeks", "days"
+            'period_count' => $period_count, // integer count: 1, 3, 6, 12 …
+        );
+
+        set_transient($cache_key, $result, HOUR_IN_SECONDS);
+
+        return $result;
+    }
+
+    /**
+     * Schedule a payment expiry retry 120 seconds from now.
+     * Used when the native TC→MP transaction hasn't been created yet at webhook time.
+     */
+    private function schedule_payment_retry(int $user_id, int $membership_id, array $webhook_data): void {
+        $retry_data_key = 'ae_tc_mp_retry_' . md5($user_id . '_' . $membership_id . '_' . time());
+        set_transient($retry_data_key, array(
+            'user_id'       => $user_id,
+            'membership_id' => $membership_id,
+            'webhook_data'  => $webhook_data,
+        ), 600); // keep data for 10 minutes
+
+        wp_schedule_single_event(time() + 120, 'ae_tc_mp_sync_retry_payment', array($retry_data_key));
+
+        $this->log('Payment retry scheduled', array(
+            'user_id'       => $user_id,
+            'membership_id' => $membership_id,
+            'retry_key'     => $retry_data_key,
+        ));
+    }
+
+    /**
+     * WP Cron callback: retry setting expiry for a delayed payment.
+     */
+    public function retry_payment_expiry(string $retry_data_key): void {
+        $data = get_transient($retry_data_key);
+        if (!$data) {
+            $this->log('retry_payment_expiry: data expired or already processed', array('key' => $retry_data_key));
+            return;
+        }
+
+        delete_transient($retry_data_key);
+
+        $result = $this->handle_successful_payment(
+            (int) $data['user_id'],
+            (int) $data['membership_id'],
+            $data['webhook_data']
+        );
+
+        $this->log('retry_payment_expiry: complete', array(
+            'user_id'       => $data['user_id'],
+            'membership_id' => $data['membership_id'],
+            'result'        => $result,
+        ));
+    }
+
+    // ============================================================================
+    // NEW v3.0.0: Twice-daily cron safety net
+    // ============================================================================
+
+    /**
+     * WP Cron callback (runs twice daily).
+     *
+     * Finds active MemberPress subscriptions whose most recent COMPLETE transaction
+     * has a definite past expires_at, and cancels them via the MP API.
+     *
+     * Safety invariants:
+     * - NEVER touches transactions where expires_at is 0000-00-00, null, or "Never" (lifetime).
+     * - NEVER cancels subscriptions where expiry is in the future.
+     * - Sends no email notifications (cancellation was already communicated when it happened).
+     *
+     * @TC_PAYLOAD_VERIFY: MP API response field names 'member_id' and 'membership_id' on
+     * subscription objects — verify against your MP version's /wp-json/mp/v1/subscriptions response.
+     */
+    public function cron_expire_overdue_subscriptions(): void {
+        $api_key = get_option('ae_tc_mp_sync_api_key', '');
+        if (empty($api_key)) {
+            $this->log('cron_expire_overdue_subscriptions: API key not configured — skipping');
+            return;
+        }
+
+        $site_url      = get_site_url();
+        $expired_count = 0;
+        $page          = 1;
+
+        $this->log('cron_expire_overdue_subscriptions: starting', array('utc_now' => gmdate('Y-m-d H:i:s')));
+
+        do {
+            $response = wp_remote_get($site_url . '/wp-json/mp/v1/subscriptions', array(
+                'timeout' => 30,
+                'headers' => array('MEMBERPRESS-API-KEY' => $api_key),
+                'body'    => array(
+                    'status'   => 'active',
+                    'per_page' => 50,
+                    'page'     => $page,
+                ),
+            ));
+
+            if (is_wp_error($response)) {
+                $this->log('cron_expire_overdue_subscriptions: fetch error', array(
+                    'error' => $response->get_error_message(),
+                ));
+                break;
+            }
+
+            $subscriptions = json_decode(wp_remote_retrieve_body($response), true);
+
+            if (empty($subscriptions) || !is_array($subscriptions)) {
+                break;
+            }
+
+            foreach ($subscriptions as $sub) {
+                $sub_id  = $sub['id']            ?? null;
+                $user_id = $sub['member_id']     ?? null; // @TC_PAYLOAD_VERIFY: MP API field name
+                $mem_id  = $sub['membership_id'] ?? null; // @TC_PAYLOAD_VERIFY: MP API field name
+
+                if (!$sub_id || !$user_id || !$mem_id) continue;
+
+                // Fetch most recent complete transaction for this subscription
+                $trans_resp = wp_remote_get($site_url . '/wp-json/mp/v1/transactions', array(
+                    'timeout' => 15,
+                    'headers' => array('MEMBERPRESS-API-KEY' => $api_key),
+                    'body'    => array(
+                        'member'     => $user_id,
+                        'membership' => $mem_id,
+                        'status'     => 'complete',
+                        'per_page'   => 1,
+                    ),
+                ));
+
+                if (is_wp_error($trans_resp)) continue;
+
+                $transactions = json_decode(wp_remote_retrieve_body($trans_resp), true);
+                if (empty($transactions) || !is_array($transactions)) continue;
+
+                $trans   = $transactions[0];
+                $expires = $trans['expires_at'] ?? null;
+
+                // Skip lifetime memberships (no expiry set)
+                if (empty($expires)
+                    || $expires === '0000-00-00 00:00:00'
+                    || strtolower($expires) === 'never') {
+                    continue;
+                }
+
+                $expiry_ts = strtotime($expires);
+                if ($expiry_ts === false || $expiry_ts > time()) {
+                    continue; // Not yet expired
+                }
+
+                // Expiry is in the past — cancel this subscription
+                $cancel_endpoint = $site_url . '/wp-json/mp/v1/subscriptions/' . $sub_id . '/cancel';
+                $cancel_response = wp_remote_post($cancel_endpoint, array(
+                    'timeout' => 20,
+                    'headers' => array(
+                        'MEMBERPRESS-API-KEY' => $api_key,
+                        'Content-Type'        => 'application/json',
+                    ),
+                    'body' => json_encode(array('send_notification' => false)),
+                ));
+
+                $cancel_code = wp_remote_retrieve_response_code($cancel_response);
+
+                $this->log('cron_expire_overdue_subscriptions: subscription cancelled', array(
+                    'sub_id'     => $sub_id,
+                    'user_id'    => $user_id,
+                    'mem_id'     => $mem_id,
+                    'expired_at' => $expires,
+                    'http_code'  => $cancel_code,
+                ));
+
+                if ($cancel_code === 200) {
+                    $expired_count++;
+                }
+            }
+
+            $page++;
+        } while (count($subscriptions) >= 50);
+
+        $this->log('cron_expire_overdue_subscriptions: complete', array('expired_count' => $expired_count));
+    }
+
     private function log($message, $context = array()) {
         $log_dir = dirname(AE_TC_MP_SYNC_LOG_FILE);
 
@@ -2209,6 +2687,8 @@ register_activation_hook(__FILE__, function() {
 
 register_deactivation_hook(__FILE__, function() {
     wp_clear_scheduled_hook('ae_tc_mp_sync_cleanup_logs');
+    wp_clear_scheduled_hook('ae_tc_mp_sync_expire_check');
+    wp_clear_scheduled_hook('ae_tc_mp_sync_retry_payment');
     flush_rewrite_rules();
 });
 
@@ -2219,68 +2699,71 @@ register_deactivation_hook(__FILE__, function() {
 if (!defined('ABSPATH')) exit;
 
 add_action('wp_enqueue_scripts', function() {
-  // Let's connect an empty script and add inline — it's easier to manage the queue this way.
-  wp_register_script('ae-mepr-tc-btn', false, [], null, true);
-  wp_enqueue_script('ae-mepr-tc-btn');
+    // Read hub URL from settings; skip entirely if not configured
+    $hub_url = get_option('ae_tc_mp_sync_hub_url', '');
+    if (empty($hub_url)) {
+        return;
+    }
+    $hub_url = esc_url($hub_url);
 
-  $hub_url = esc_url('https://aussie-english.thrivecart.com/updateinfo/');
+    // Register an empty handle so we can attach inline JS cleanly
+    wp_register_script('ae-mepr-tc-btn', false, array(), null, true);
+    wp_enqueue_script('ae-mepr-tc-btn');
 
-  $js = <<<JS
-(function() {
-  function onReady(fn){ if(document.readyState!=='loading'){fn()} else {document.addEventListener('DOMContentLoaded', fn);} }
-  onReady(function(){
-    try {
-      // We only work on the tab ?action=subscriptions
-      var params = new URLSearchParams(window.location.search);
-      if (params.get('action') !== 'subscriptions') return;
+    $js  = '(function() {' . "\n";
+    $js .= '  function onReady(fn){ if(document.readyState!=="loading"){fn()} else {document.addEventListener("DOMContentLoaded", fn);} }' . "\n";
+    $js .= '  onReady(function(){' . "\n";
+    $js .= '    try {' . "\n";
+    $js .= '      // Only inject on the subscriptions tab' . "\n";
+    $js .= '      var params = new URLSearchParams(window.location.search);' . "\n";
+    $js .= '      if (params.get("action") !== "subscriptions") return;' . "\n";
+    $js .= "\n";
+    $js .= '      // Button' . "\n";
+    $js .= '      var btn = document.createElement("a");' . "\n";
+    $js .= '      btn.href = "' . $hub_url . '";' . "\n";
+    $js .= '      btn.target = "_blank";' . "\n";
+    $js .= '      btn.rel = "noopener";' . "\n";
+    $js .= '      btn.textContent = "Manage my subscriptions";' . "\n";
+    $js .= '      btn.className = "button ae-tc-manage-btn";' . "\n";
+    $js .= "\n";
+    $js .= '      // Styles' . "\n";
+    $js .= '      var style = document.createElement("style");' . "\n";
+    $js .= '      style.textContent = ".ae-tc-manage-btn{display:inline-block;margin-top:16px;padding:10px 16px;font-size:16px;} .ae-tc-btn-wrap{margin:16px}";' . "\n";
+    $js .= '      document.head.appendChild(style);' . "\n";
+    $js .= "\n";
+    $js .= '      // Try several selectors to support any theme' . "\n";
+    $js .= '      var targets = [' . "\n";
+    $js .= '        ".mepr-account-subscriptions",' . "\n";
+    $js .= '        "#mepr-account-subscriptions-table",' . "\n";
+    $js .= '        ".mepr-account-content",' . "\n";
+    $js .= '        ".mepr-account-table",' . "\n";
+    $js .= '        ".mepr-account",' . "\n";
+    $js .= '        "#content", ".site-content", "main"' . "\n";
+    $js .= '      ];' . "\n";
+    $js .= "\n";
+    $js .= '      var inserted = false;' . "\n";
+    $js .= '      for (var i = 0; i < targets.length; i++) {' . "\n";
+    $js .= '        var el = document.querySelector(targets[i]);' . "\n";
+    $js .= '        if (el) {' . "\n";
+    $js .= '          var wrap = document.createElement("p");' . "\n";
+    $js .= '          wrap.className = "ae-tc-btn-wrap";' . "\n";
+    $js .= '          wrap.appendChild(btn);' . "\n";
+    $js .= '          el.appendChild(wrap);' . "\n";
+    $js .= '          inserted = true;' . "\n";
+    $js .= '          break;' . "\n";
+    $js .= '        }' . "\n";
+    $js .= '      }' . "\n";
+    $js .= '      // Last resort: append to body' . "\n";
+    $js .= '      if (!inserted) {' . "\n";
+    $js .= '        var wrap2 = document.createElement("p");' . "\n";
+    $js .= '        wrap2.className = "ae-tc-btn-wrap";' . "\n";
+    $js .= '        wrap2.style.textAlign = "left";' . "\n";
+    $js .= '        wrap2.appendChild(btn);' . "\n";
+    $js .= '        document.body.appendChild(wrap2);' . "\n";
+    $js .= '      }' . "\n";
+    $js .= '    } catch(e){ /* no-op */ }' . "\n";
+    $js .= '  });' . "\n";
+    $js .= '})();' . "\n";
 
-      // Button
-      var btn = document.createElement('a');
-      btn.href = '{$hub_url}';
-      btn.target = '_blank';
-      btn.rel = 'noopener';
-      btn.textContent = 'Manage my subscriptions';
-      btn.className = 'button ae-tc-manage-btn';
-
-      // Styles
-      var style = document.createElement('style');
-      style.textContent = ".ae-tc-manage-btn{display:inline-block;margin-top:16px;padding:10px 16px;font-size:16px;} .ae-tc-btn-wrap{margin:16px}";
-      document.head.appendChild(style);
-
-      // Where to insert: let's try a few selectors to make it work on any theme
-      var targets = [
-        '.mepr-account-subscriptions',
-        '#mepr-account-subscriptions-table',
-        '.mepr-account-content',
-        '.mepr-account-table',
-        '.mepr-account',
-        '#content', '.site-content', 'main'
-      ];
-
-      var inserted = false;
-      for (var i=0;i<targets.length;i++) {
-        var el = document.querySelector(targets[i]);
-        if (el) {
-          var wrap = document.createElement('p');
-          wrap.className = 'ae-tc-btn-wrap';
-          wrap.appendChild(btn);
-          el.appendChild(wrap);
-          inserted = true;
-          break;
-        }
-      }
-      // If you cannot find the container, add it to the end of the body (as a last resort).
-      if (!inserted) {
-        var wrap = document.createElement('p');
-        wrap.className = 'ae-tc-btn-wrap';
-        wrap.style.textAlign = 'left';
-        wrap.appendChild(btn);
-        document.body.appendChild(wrap);
-      }
-    } catch(e){ /* no-op */ }
-  });
-})();
-JS;
-
-  wp_add_inline_script('ae-mepr-tc-btn', $js);
+    wp_add_inline_script('ae-mepr-tc-btn', $js);
 });

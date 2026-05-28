@@ -1,0 +1,817 @@
+/**
+ * ThriveCart MemberPress Sync - Admin Styles
+ * Version: 3.0.0
+ * Author: LeonovDesign
+ */
+
+/* ============================================
+   BASE STYLES
+   ============================================ */
+
+.ae-tc-mp-sync-wrap {
+    margin-top: 20px;
+}
+
+.ae-tc-mp-sync-wrap h1 {
+    margin-bottom: 5px;
+}
+
+.ae-tc-mp-sync-wrap .description {
+    margin-bottom: 20px;
+    font-size: 14px;
+    color: #646970;
+}
+
+.ae-tc-mp-sync-wrap .nav-tab-wrapper {
+    margin-bottom: 0;
+}
+
+.ae-tc-mp-sync-wrap .tab-content {
+    background: #fff;
+    padding: 25px;
+    border: 1px solid #ccd0d4;
+    border-top: none;
+    box-shadow: 0 1px 3px rgba(0,0,0,.04);
+    min-height: 400px;
+}
+
+.ae-tc-mp-sync-wrap code {
+    background: #f0f0f1;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-size: 13px;
+    word-break: break-all;
+    font-family: 'Courier New', Consolas, Monaco, monospace;
+}
+
+.ae-tc-mp-sync-wrap table.form-table th {
+    width: 220px;
+    font-weight: 600;
+    padding-right: 20px;
+}
+
+.ae-tc-mp-sync-wrap .wp-list-table {
+    margin-top: 15px;
+}
+
+.ae-tc-mp-sync-wrap .wp-list-table td {
+    vertical-align: middle;
+}
+
+/* ============================================
+   MANUAL/INFO SECTIONS
+   ============================================ */
+
+.ae-manual-section {
+    background: #f9f9f9;
+    border-left: 4px solid #2271b1;
+    padding: 20px 25px;
+    margin-bottom: 25px;
+    border-radius: 0 4px 4px 0;
+    box-shadow: 0 1px 2px rgba(0,0,0,.05);
+}
+
+.ae-manual-section h3 {
+    margin-top: 0;
+    margin-bottom: 15px;
+    color: #2271b1;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.ae-manual-section h4 {
+    margin-top: 20px;
+    margin-bottom: 10px;
+    color: #1d2327;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.ae-manual-section ol,
+.ae-manual-section ul {
+    margin-left: 20px;
+    margin-bottom: 15px;
+}
+
+.ae-manual-section li {
+    margin-bottom: 10px;
+    line-height: 1.7;
+}
+
+.ae-manual-section code {
+    background: #fff;
+    border: 1px solid #ddd;
+    padding: 3px 6px;
+}
+
+.ae-manual-section p {
+    line-height: 1.6;
+    margin-bottom: 12px;
+}
+
+.ae-manual-section strong {
+    color: #1d2327;
+}
+
+/* ============================================
+   MAPPING CARDS
+   ============================================ */
+
+#ae-mappings-container {
+    margin-bottom: 25px;
+}
+
+.ae-mapping-row {
+    background: #ffffff;
+    padding: 25px;
+    margin-bottom: 25px;
+    border: 2px solid #2271b1;
+    border-radius: 6px;
+    box-shadow: 0 2px 4px rgba(0,0,0,.08);
+    transition: all 0.3s ease;
+    position: relative;
+    animation: fadeIn 0.3s ease;
+}
+
+.ae-mapping-row:hover {
+    box-shadow: 0 4px 8px rgba(0,0,0,.12);
+    transform: translateY(-2px);
+}
+
+.ae-mapping-row.inactive {
+    border-color: #c3c4c7;
+    opacity: 0.65;
+    background: #f9f9f9;
+}
+
+.ae-mapping-row.inactive:hover {
+    opacity: 0.8;
+}
+
+/* Mapping Fields */
+.ae-mapping-field {
+    margin-bottom: 20px;
+}
+
+.ae-mapping-field:last-of-type {
+    margin-bottom: 0;
+}
+
+.ae-mapping-field label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #1d2327;
+    font-size: 14px;
+}
+
+.ae-mapping-field input[type="text"],
+.ae-mapping-field select,
+.ae-mapping-field textarea {
+    width: 100%;
+    max-width: 700px;
+    padding: 10px 12px;
+    border: 1px solid #8c8f94;
+    border-radius: 4px;
+    font-size: 14px;
+    transition: border-color 0.2s ease;
+}
+
+.ae-mapping-field input[type="text"]:focus,
+.ae-mapping-field select:focus,
+.ae-mapping-field textarea:focus {
+    border-color: #2271b1;
+    box-shadow: 0 0 0 1px #2271b1;
+    outline: none;
+}
+
+.ae-mapping-field textarea {
+    height: 80px;
+    font-family: 'Courier New', Consolas, Monaco, monospace;
+    resize: vertical;
+    min-height: 60px;
+    max-height: 200px;
+}
+
+.ae-mapping-field input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin-right: 8px;
+    vertical-align: middle;
+}
+
+.ae-mapping-field label:has(input[type="checkbox"]) {
+    display: inline-flex;
+    align-items: center;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+/* Help Text */
+.ae-mapping-help {
+    color: #646970;
+    font-size: 13px;
+    font-style: italic;
+    margin-top: 6px;
+    line-height: 1.5;
+}
+
+.ae-mapping-help strong {
+    font-style: normal;
+    color: #1d2327;
+}
+
+/* Mapping Actions */
+.ae-mapping-actions {
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 2px solid #f0f0f1;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.ae-remove-mapping {
+    background: #dc3232;
+    color: #fff;
+    border-color: #ba281e;
+    transition: all 0.2s ease;
+}
+
+.ae-remove-mapping:hover {
+    background: #ba281e;
+    border-color: #8a211a;
+    color: #fff;
+}
+
+/* ============================================
+   PAYMENT TYPE BADGES
+   ============================================ */
+
+.ae-payment-type-badge {
+    display: inline-block;
+    padding: 5px 12px;
+    background: #e5e5e5;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-left: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+    transition: all 0.2s ease;
+}
+
+.ae-payment-type-badge.recurring {
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}
+
+.ae-payment-type-badge.onetime {
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeaa7;
+}
+
+.ae-payment-type-badge.trial {
+    background: #d1ecf1;
+    color: #0c5460;
+    border: 1px solid #bee5eb;
+}
+
+.wp-list-table .ae-payment-type-badge:hover {
+    transform: scale(1.05);
+}
+
+/* ============================================
+   SUMMARY TABLE
+   ============================================ */
+
+.ae-tc-mp-sync-wrap .wp-list-table.mappings-summary {
+    margin-top: 30px;
+}
+
+.ae-tc-mp-sync-wrap .wp-list-table.mappings-summary thead th {
+    background: #f0f0f1;
+    font-weight: 600;
+    padding: 12px;
+}
+
+.ae-tc-mp-sync-wrap .wp-list-table.mappings-summary td {
+    padding: 12px;
+    vertical-align: middle;
+}
+
+.ae-tc-mp-sync-wrap .wp-list-table.mappings-summary tr:hover {
+    background: #f9f9f9;
+}
+
+/* Empty state */
+.ae-empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    background: #f9f9f9;
+    border: 2px dashed #c3c4c7;
+    border-radius: 6px;
+    margin: 20px 0;
+}
+
+.ae-empty-state h3 {
+    margin-top: 0;
+    color: #646970;
+}
+
+.ae-empty-state p {
+    color: #787c82;
+    margin-bottom: 20px;
+}
+
+/* ============================================
+   STATUS INDICATORS
+   ============================================ */
+
+.ae-status-indicator {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.ae-status-indicator.active {
+    background: #46b450;
+    box-shadow: 0 0 0 3px rgba(70, 180, 80, 0.2);
+}
+
+.ae-status-indicator.inactive {
+    background: #dc3232;
+    box-shadow: 0 0 0 3px rgba(220, 50, 50, 0.2);
+}
+
+.ae-status-text {
+    display: inline-flex;
+    align-items: center;
+    font-weight: 500;
+}
+
+.ae-status-text.active {
+    color: #46b450;
+}
+
+.ae-status-text.inactive {
+    color: #dc3232;
+}
+
+/* ============================================
+   NOTICES & ALERTS
+   ============================================ */
+
+.ae-tc-mp-sync-wrap .notice.inline {
+    margin: 20px 0;
+    padding: 12px 18px;
+    border-left-width: 4px;
+}
+
+.ae-tc-mp-sync-wrap .notice.inline p {
+    margin: 0.5em 0;
+}
+
+.ae-info-box {
+    background: #e7f5fe;
+    border-left: 4px solid #00a0d2;
+    padding: 15px 20px;
+    margin: 20px 0;
+    border-radius: 0 4px 4px 0;
+}
+
+.ae-info-box p {
+    margin: 8px 0;
+}
+
+.ae-info-box strong {
+    color: #00769c;
+}
+
+.ae-warning-box {
+    background: #fff8e5;
+    border-left: 4px solid #f0b849;
+    padding: 15px 20px;
+    margin: 20px 0;
+    border-radius: 0 4px 4px 0;
+}
+
+.ae-success-box {
+    background: #ecf7ed;
+    border-left: 4px solid #46b450;
+    padding: 15px 20px;
+    margin: 20px 0;
+    border-radius: 0 4px 4px 0;
+}
+
+/* ============================================
+   BUTTONS & CONTROLS
+   ============================================ */
+
+#ae-add-mapping {
+    background: #2271b1;
+    color: #fff;
+    border-color: #135e96;
+    font-weight: 600;
+    padding: 8px 20px;
+    height: auto;
+    font-size: 14px;
+    transition: all 0.2s ease;
+}
+
+#ae-add-mapping:hover {
+    background: #135e96;
+    border-color: #0a4b78;
+    color: #fff;
+}
+
+#ae-add-mapping:before {
+    content: '+ ';
+    font-size: 16px;
+    font-weight: bold;
+    margin-right: 3px;
+}
+
+.ae-tc-mp-sync-wrap .submit input[type="submit"].button-primary {
+    padding: 10px 24px;
+    height: auto;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+/* ============================================
+   LOG VIEWER
+   ============================================ */
+
+.ae-tc-mp-sync-wrap .log-viewer,
+.ae-log-viewer {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 20px;
+    font-family: 'Courier New', Consolas, Monaco, monospace;
+    font-size: 12px;
+    overflow-x: auto;
+    max-height: 500px;
+    overflow-y: auto;
+    border-radius: 6px;
+    line-height: 1.6;
+    border: 1px solid #2c2c2c;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,.3);
+}
+
+.ae-log-viewer::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+.ae-log-viewer::-webkit-scrollbar-track {
+    background: #2c2c2c;
+}
+
+.ae-log-viewer::-webkit-scrollbar-thumb {
+    background: #555;
+    border-radius: 5px;
+}
+
+.ae-log-viewer::-webkit-scrollbar-thumb:hover {
+    background: #777;
+}
+
+/* ============================================
+   FORM ENHANCEMENTS
+   ============================================ */
+
+.ae-tc-mp-sync-wrap input[type="text"].regular-text,
+.ae-tc-mp-sync-wrap input[type="email"].regular-text,
+.ae-tc-mp-sync-wrap input[type="url"].large-text,
+.ae-tc-mp-sync-wrap input[type="number"] {
+    padding: 8px 12px;
+    font-size: 14px;
+    border-radius: 4px;
+    transition: border-color 0.2s ease;
+}
+
+.ae-tc-mp-sync-wrap input[type="text"].regular-text,
+.ae-tc-mp-sync-wrap input[type="email"].regular-text {
+    width: 100%;
+    max-width: 600px;
+}
+
+.ae-tc-mp-sync-wrap select {
+    min-width: 300px;
+    padding: 8px 12px;
+    font-size: 14px;
+    border-radius: 4px;
+}
+
+.ae-tc-mp-sync-wrap input[readonly] {
+    background: #f6f7f7;
+    cursor: pointer;
+}
+
+.ae-tc-mp-sync-wrap input[readonly]:hover {
+    background: #e9ecef;
+}
+
+.ae-tc-mp-sync-wrap input[readonly]:focus {
+    background: #fff;
+    border-color: #2271b1;
+}
+
+/* ============================================
+   TABS
+   ============================================ */
+
+.ae-tc-mp-sync-wrap .nav-tab {
+    position: relative;
+    padding: 12px 16px;
+    font-weight: 500;
+}
+
+.ae-tc-mp-sync-wrap .nav-tab-active {
+    font-weight: 600;
+}
+
+.ae-tc-mp-sync-wrap .nav-tab-active:before {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: #2271b1;
+}
+
+/* ============================================
+   VERSION BADGE
+   ============================================ */
+
+.ae-version-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #fff;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-left: 10px;
+    vertical-align: middle;
+    box-shadow: 0 2px 4px rgba(102, 126, 234, 0.3);
+}
+
+/* ============================================
+   LOADING & ANIMATIONS
+   ============================================ */
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.ae-loading {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 3px solid #f3f3f3;
+    border-top: 3px solid #2271b1;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* ============================================
+   TOOLTIPS
+   ============================================ */
+
+.ae-tooltip {
+    position: relative;
+    display: inline-block;
+    cursor: help;
+    border-bottom: 1px dotted #8c8f94;
+}
+
+.ae-tooltip:hover:after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1e1e1e;
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    white-space: nowrap;
+    z-index: 1000;
+    margin-bottom: 5px;
+}
+
+/* ============================================
+   RESPONSIVE DESIGN
+   ============================================ */
+
+@media screen and (max-width: 1200px) {
+    .ae-mapping-field input[type="text"],
+    .ae-mapping-field select,
+    .ae-mapping-field textarea {
+        max-width: 100%;
+    }
+}
+
+@media screen and (max-width: 782px) {
+    .ae-tc-mp-sync-wrap table.form-table th,
+    .ae-tc-mp-sync-wrap table.form-table td {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+    }
+
+    .ae-tc-mp-sync-wrap table.form-table th {
+        padding-bottom: 8px;
+        width: 100%;
+    }
+
+    .ae-tc-mp-sync-wrap input[type="text"].regular-text,
+    .ae-tc-mp-sync-wrap input[type="email"].regular-text,
+    .ae-tc-mp-sync-wrap select {
+        width: 100%;
+        max-width: 100%;
+        min-width: 100%;
+    }
+
+    .ae-mapping-row {
+        padding: 20px 15px;
+    }
+
+    .ae-mapping-field input[type="text"],
+    .ae-mapping-field select,
+    .ae-mapping-field textarea {
+        font-size: 16px; /* Prevents zoom on iOS */
+    }
+
+    .ae-manual-section {
+        padding: 15px;
+    }
+
+    #ae-add-mapping,
+    .ae-remove-mapping {
+        width: 100%;
+        text-align: center;
+        justify-content: center;
+    }
+
+    .ae-mapping-actions {
+        flex-direction: column;
+    }
+
+    .ae-tc-mp-sync-wrap .tab-content {
+        padding: 15px;
+    }
+
+    .ae-payment-type-badge {
+        display: block;
+        margin: 5px 0;
+        text-align: center;
+    }
+
+    .ae-tc-mp-sync-wrap .wp-list-table thead {
+        display: none;
+    }
+
+    .ae-tc-mp-sync-wrap .wp-list-table tr {
+        display: block;
+        margin-bottom: 20px;
+        border: 1px solid #ccd0d4;
+        border-radius: 4px;
+    }
+
+    .ae-tc-mp-sync-wrap .wp-list-table td {
+        display: block;
+        text-align: left;
+        padding: 10px 15px;
+        border-top: 1px solid #f0f0f1;
+    }
+
+    .ae-tc-mp-sync-wrap .wp-list-table td:first-child {
+        border-top: none;
+    }
+
+    .ae-tc-mp-sync-wrap .wp-list-table td:before {
+        content: attr(data-label);
+        font-weight: 600;
+        display: block;
+        margin-bottom: 5px;
+        color: #646970;
+    }
+}
+
+@media screen and (max-width: 600px) {
+    .ae-tc-mp-sync-wrap h1 {
+        font-size: 20px;
+    }
+
+    .ae-manual-section h3 {
+        font-size: 15px;
+    }
+
+    .ae-version-badge {
+        display: block;
+        margin: 10px 0 0 0;
+        width: fit-content;
+    }
+}
+
+/* ============================================
+   PRINT STYLES
+   ============================================ */
+
+@media print {
+    .ae-tc-mp-sync-wrap .nav-tab-wrapper,
+    .ae-tc-mp-sync-wrap .button,
+    .ae-mapping-actions {
+        display: none;
+    }
+
+    .ae-mapping-row {
+        border: 1px solid #000;
+        page-break-inside: avoid;
+    }
+
+    .ae-tc-mp-sync-wrap .tab-content {
+        border: none;
+        box-shadow: none;
+    }
+}
+
+/* ============================================
+   ACCESSIBILITY
+   ============================================ */
+
+.ae-tc-mp-sync-wrap *:focus {
+    outline: 2px solid #2271b1;
+    outline-offset: 2px;
+}
+
+.ae-tc-mp-sync-wrap button:focus,
+.ae-tc-mp-sync-wrap input:focus,
+.ae-tc-mp-sync-wrap select:focus,
+.ae-tc-mp-sync-wrap textarea:focus {
+    box-shadow: 0 0 0 2px #fff, 0 0 0 4px #2271b1;
+}
+
+.ae-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0,0,0,0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* ============================================
+   DARK MODE (log viewer)
+   ============================================ */
+
+.ae-log-viewer.dark-mode {
+    background: #0d1117;
+    color: #c9d1d9;
+    border-color: #30363d;
+}
+
+/* ============================================
+   UTILITY CLASSES
+   ============================================ */
+
+.ae-mt-20 { margin-top: 20px; }
+.ae-mb-20 { margin-bottom: 20px; }
+.ae-text-center { text-align: center; }
+.ae-text-muted { color: #646970; }
+.ae-font-bold { font-weight: 600; }
+.ae-hidden { display: none; }
+
+.ae-clearfix:after {
+    content: "";
+    display: table;
+    clear: both;
+}
